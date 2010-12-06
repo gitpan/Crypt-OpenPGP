@@ -4,12 +4,10 @@ author:
   - Benjamin
 build_requires:
   ExtUtils::MakeMaker: 6.42
-  Test::Exception: 0
-  Test::More: 0
 configure_requires:
   ExtUtils::MakeMaker: 6.42
 distribution_type: module
-generated_by: 'Module::Install version 0.91'
+generated_by: 'Module::Install version 1.00'
 license: perl
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
@@ -35,12 +33,13 @@ requires:
   Digest::MD5: 0
   Digest::SHA1: 0
   File::HomeDir: 0
+  Filter::Util::Call: 0
   LWP::UserAgent: 0
   MIME::Base64: 0
-  Math::Pari: 0
+  Math::BigInt: 0
   URI::Escape: 0
   perl: 5.8.1
 resources:
   license: http://dev.perl.org/licenses/
-  repository: origin
-version: 1.04
+  repository: git://github.com/btrott/Crypt-OpenPGP.git
+version: 1.05

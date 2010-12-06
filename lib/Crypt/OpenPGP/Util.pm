@@ -1,24 +1,30 @@
 package Crypt::OpenPGP::Util;
 use strict;
 
-use Math::Pari qw( PARI pari2num floor Mod lift );
+# For some reason, FastCalc causes problems. Restrict to one of these 3 backends
+use Math::BigInt only => 'Pari,GMP,Calc';
 
 use vars qw( @EXPORT_OK @ISA );
 use Exporter;
-@EXPORT_OK = qw( bitsize bin2mp mp2bin mod_exp mod_inverse
+@EXPORT_OK = qw( bitsize bin2bigint bin2mp bigint2bin mp2bin mod_exp mod_inverse
                  dash_escape dash_unescape canonical_text );
 @ISA = qw( Exporter );
 
 sub bitsize {
-    return pari2num(floor(Math::Pari::log($_[0])/Math::Pari::log(2)) + 1);
+    my $bigint = Math::BigInt->new($_[0]);
+    return $bigint->bfloor($bigint->blog(2)) + 1;   
 }
 
-sub bin2mp { Math::Pari::_hex_cvt('0x' . unpack 'H*', $_[0]) }
+sub bin2bigint { $_[0] ? Math::BigInt->new('0x' . unpack 'H*', $_[0]) : 0 }
 
-sub mp2bin {
+*bin2mp = \&bin2bigint;
+
+sub bigint2bin {
     my($p) = @_;
-    $p = PARI($p);
-    my $base = PARI(1) << PARI(4*8);
+        
+	$p = _ensure_bigint($p);
+    
+    my $base = 1 << 4*8;
     my $res = '';
     while ($p != 0) {
         my $r = $p % $base;
@@ -35,16 +41,22 @@ sub mp2bin {
     $res;
 }
 
+*mp2bin = \&bigint2bin;
+
 sub mod_exp {
     my($a, $exp, $n) = @_;
-    my $m = Mod($a, $n);
-    lift($m ** $exp);
+    
+    $a = _ensure_bigint($a);
+    
+    $a->copy->bmodpow($exp, $n);
 }
 
 sub mod_inverse {
     my($a, $n) = @_;
-    my $m = Mod(1, $n);
-    lift($m / $a);
+    
+    $a = _ensure_bigint($a);
+
+    $a->copy->bmodinv($n);
 }
 
 sub dash_escape {
@@ -76,6 +88,17 @@ sub canonical_text {
     join "\r\n", @lines;
 }
 
+
+sub _ensure_bigint {
+	my $num = shift;	
+	
+    if ($num && (! ref $num || ! $num->isa('Math::BigInt'))) {    	
+    	$num = Math::BigInt->new($num);
+    }
+    
+    return $num;
+}
+
 1;
 __END__
 
@@ -90,31 +113,37 @@ used through the I<Crypt::OpenPGP> set of libraries.
 
 =head2 bitsize($n)
 
-Returns the number of bits in the I<Math::Pari> integer object
+Returns the number of bits in the I<Math::BigInt> integer object
 I<$n>.
 
-=head2 bin2mp($string)
+=head2 bin2bigint($string)
 
 Given a string I<$string> of any length, treats the string as a
 base-256 representation of an integer, and returns that integer,
-a I<Math::Pari> object.
+a I<Math::BigInt> object.
 
-=head2 mp2bin($int)
+I<bin2mp> is an alias for this function, for backwards
+compatibility reasons.
 
-Given a biginteger I<$int> (a I<Math::Pari> object), linearizes
+=head2 bigint2bin($int)
+
+Given a biginteger I<$int> (a I<Math::BigInt> object), linearizes
 the integer into an octet string, and returns the octet string.
+
+I<mp2bin> is an alias for this function, for backwards
+compatibility reasons.
 
 =head2 mod_exp($a, $exp, $n)
 
 Computes $a ^ $exp mod $n and returns the value. The calculations
-are done using I<Math::Pari>, and the return value is a I<Math::Pari>
+are done using I<Math::BigInt>, and the return value is a I<Math::BigInt>
 object.
 
 =head2 mod_inverse($a, $n)
 
 Computes the multiplicative inverse of $a mod $n and returns the
-value. The calculations are done using I<Math::Pari>, and the
-return value is a I<Math::Pari> object.
+value. The calculations are done using I<Math::BigInt>, and the
+return value is a I<Math::BigInt> object.
 
 =head2 canonical_text($text)
 
