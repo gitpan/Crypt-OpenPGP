@@ -42,4 +42,4 @@ requires:
 resources:
   license: http://dev.perl.org/licenses/
   repository: git://github.com/btrott/Crypt-OpenPGP.git
-version: 1.05
+version: 1.06
