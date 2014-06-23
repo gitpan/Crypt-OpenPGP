@@ -5,7 +5,7 @@ use 5.006;
 use strict;
 use warnings;
 
-our $VERSION = '0.94';
+our $VERSION = '1.001002';
 $VERSION = eval $VERSION;    ## no critic (BuiltinFunctions::ProhibitStringyEval)
 
 BEGIN {
@@ -24,7 +24,7 @@ BEGIN {
         require threads::shared;
 
         # Hack around YET ANOTHER threads::shared bug.  It would
-        # occassionally forget the contents of the variable when sharing it.
+        # occasionally forget the contents of the variable when sharing it.
         # So we first copy the data, then share, then put our copy back.
         *share = sub (\[$@%]) {
             my $type = ref $_[0];
@@ -90,7 +90,21 @@ sub create {
     return $self;
 }
 
-#line 168
+
+# Copy an object, currently a shallow.
+# This does *not* bless the destination.  This keeps the destructor from
+# firing when we're just storing a copy of the object to restore later.
+sub _copy {
+    my($src, $dest) = @_;
+
+    %$dest = %$src;
+    _share_keys($dest);
+
+    return;
+}
+
+
+#line 182
 
 sub child {
     my( $self, $name ) = @_;
@@ -99,25 +113,40 @@ sub child {
         $self->croak("You already have a child named ($self->{Child_Name}) running");
     }
 
-    my $child = bless {}, ref $self;
-    $child->reset;
+    my $parent_in_todo = $self->in_todo;
+
+    # Clear $TODO for the child.
+    my $orig_TODO = $self->find_TODO(undef, 1, undef);
+
+    my $class = ref $self;
+    my $child = $class->create;
 
     # Add to our indentation
     $child->_indent( $self->_indent . '    ' );
-    $child->{$_} = $self->{$_} foreach qw{Out_FH Todo_FH Fail_FH};
+
+    # Make the child use the same outputs as the parent
+    for my $method (qw(output failure_output todo_output)) {
+        $child->$method( $self->$method );
+    }
+
+    # Ensure the child understands if they're inside a TODO
+    if( $parent_in_todo ) {
+        $child->failure_output( $self->todo_output );
+    }
 
     # This will be reset in finalize. We do this here lest one child failure
     # cause all children to fail.
     $child->{Child_Error} = $?;
     $?                    = 0;
     $child->{Parent}      = $self;
+    $child->{Parent_TODO} = $orig_TODO;
     $child->{Name}        = $name || "Child of " . $self->name;
     $self->{Child_Name}   = $child->name;
     return $child;
 }
 
 
-#line 201
+#line 230
 
 sub subtest {
     my $self = shift;
@@ -129,27 +158,59 @@ sub subtest {
 
     # Turn the child into the parent so anyone who has stored a copy of
     # the Test::Builder singleton will get the child.
-    my $child = $self->child($name);
-    my %parent = %$self;
-    %$self = %$child;
-
     my $error;
-    if( !eval { $subtests->(); 1 } ) {
-        $error = $@;
+    my $child;
+    my $parent = {};
+    {
+        # child() calls reset() which sets $Level to 1, so we localize
+        # $Level first to limit the scope of the reset to the subtest.
+        local $Test::Builder::Level = $Test::Builder::Level + 1;
+
+        # Store the guts of $self as $parent and turn $child into $self.
+        $child  = $self->child($name);
+        _copy($self,  $parent);
+        _copy($child, $self);
+
+        my $run_the_subtests = sub {
+            # Add subtest name for clarification of starting point
+            $self->note("Subtest: $name");
+            $subtests->();
+            $self->done_testing unless $self->_plan_handled;
+            1;
+        };
+
+        if( !eval { $run_the_subtests->() } ) {
+            $error = $@;
+        }
     }
 
     # Restore the parent and the copied child.
-    %$child = %$self;
-    %$self = %parent;
+    _copy($self,   $child);
+    _copy($parent, $self);
+
+    # Restore the parent's $TODO
+    $self->find_TODO(undef, 1, $child->{Parent_TODO});
 
     # Die *after* we restore the parent.
     die $error if $error and !eval { $error->isa('Test::Builder::Exception') };
 
-    return $child->finalize;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+    my $finalize = $child->finalize;
+
+    $self->BAIL_OUT($child->{Bailed_Out_Reason}) if $child->{Bailed_Out};
+
+    return $finalize;
+}
+
+#line 309
+
+sub _plan_handled {
+    my $self = shift;
+    return $self->{Have_Plan} || $self->{No_Plan} || $self->{Skip_All};
 }
 
 
-#line 250
+#line 334
 
 sub finalize {
     my $self = shift;
@@ -158,21 +219,26 @@ sub finalize {
     if( $self->{Child_Name} ) {
         $self->croak("Can't call finalize() with child ($self->{Child_Name}) active");
     }
+
+    local $? = 0;     # don't fail if $subtests happened to set $? nonzero
     $self->_ending;
 
     # XXX This will only be necessary for TAP envelopes (we think)
     #$self->_print( $self->is_passing ? "PASS\n" : "FAIL\n" );
 
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
     my $ok = 1;
     $self->parent->{Child_Name} = undef;
-    if ( $self->{Skip_All} ) {
-        $self->parent->skip($self->{Skip_All});
-    }
-    elsif ( not @{ $self->{Test_Results} } ) {
-        $self->parent->ok( 0, sprintf q[No tests run for subtest "%s"], $self->name );
-    }
-    else {
-        $self->parent->ok( $self->is_passing, $self->name );
+    unless ($self->{Bailed_Out}) {
+        if ( $self->{Skip_All} ) {
+            $self->parent->skip($self->{Skip_All});
+        }
+        elsif ( not @{ $self->{Test_Results} } ) {
+            $self->parent->ok( 0, sprintf q[No tests run for subtest "%s"], $self->name );
+        }
+        else {
+            $self->parent->ok( $self->is_passing, $self->name );
+        }
     }
     $? = $self->{Child_Error};
     delete $self->{Parent};
@@ -190,17 +256,17 @@ sub _indent      {
     return $self->{Indent};
 }
 
-#line 300
+#line 389
 
 sub parent { shift->{Parent} }
 
-#line 312
+#line 401
 
 sub name { shift->{Name} }
 
 sub DESTROY {
     my $self = shift;
-    if ( $self->parent ) {
+    if ( $self->parent and $$ == $self->{Original_Pid} ) {
         my $name = $self->name;
         $self->diag(<<"FAIL");
 Child ($name) exited without calling finalize()
@@ -210,7 +276,7 @@ FAIL
     }
 }
 
-#line 336
+#line 425
 
 our $Level;
 
@@ -227,12 +293,12 @@ sub reset {    ## no critic (Subroutines::ProhibitBuiltinHomonyms)
     $self->{Have_Plan}    = 0;
     $self->{No_Plan}      = 0;
     $self->{Have_Output_Plan} = 0;
+    $self->{Done_Testing} = 0;
 
     $self->{Original_Pid} = $$;
     $self->{Child_Name}   = undef;
     $self->{Indent}     ||= '';
 
-    share( $self->{Curr_Test} );
     $self->{Curr_Test} = 0;
     $self->{Test_Results} = &share( [] );
 
@@ -251,12 +317,26 @@ sub reset {    ## no critic (Subroutines::ProhibitBuiltinHomonyms)
     $self->{Start_Todo} = 0;
     $self->{Opened_Testhandles} = 0;
 
+    $self->_share_keys;
     $self->_dup_stdhandles;
 
     return;
 }
 
-#line 414
+
+# Shared scalar values are lost when a hash is copied, so we have
+# a separate method to restore them.
+# Shared references are retained across copies.
+sub _share_keys {
+    my $self = shift;
+
+    share( $self->{Curr_Test} );
+
+    return;
+}
+
+
+#line 517
 
 my %plan_cmds = (
     no_plan     => \&no_plan,
@@ -303,8 +383,7 @@ sub _plan_tests {
     return;
 }
 
-
-#line 470
+#line 572
 
 sub expected_tests {
     my $self = shift;
@@ -322,7 +401,7 @@ sub expected_tests {
     return $self->{Expected_Tests};
 }
 
-#line 494
+#line 596
 
 sub no_plan {
     my($self, $arg) = @_;
@@ -335,8 +414,7 @@ sub no_plan {
     return 1;
 }
 
-
-#line 528
+#line 629
 
 sub _output_plan {
     my($self, $max, $directive, $reason) = @_;
@@ -354,7 +432,8 @@ sub _output_plan {
     return;
 }
 
-#line 579
+
+#line 681
 
 sub done_testing {
     my($self, $num_tests) = @_;
@@ -397,7 +476,7 @@ sub done_testing {
 }
 
 
-#line 630
+#line 732
 
 sub has_plan {
     my $self = shift;
@@ -407,7 +486,7 @@ sub has_plan {
     return(undef);
 }
 
-#line 647
+#line 749
 
 sub skip_all {
     my( $self, $reason ) = @_;
@@ -421,7 +500,7 @@ sub skip_all {
     exit(0);
 }
 
-#line 672
+#line 774
 
 sub exported_to {
     my( $self, $pack ) = @_;
@@ -432,7 +511,7 @@ sub exported_to {
     return $self->{Exported_To};
 }
 
-#line 702
+#line 804
 
 sub ok {
     my( $self, $test, $name ) = @_;
@@ -589,16 +668,14 @@ sub _is_dualvar {
 
     no warnings 'numeric';
     my $numval = $val + 0;
-    return $numval != 0 and $numval ne $val ? 1 : 0;
+    return ($numval != 0 and $numval ne $val ? 1 : 0);
 }
 
-#line 876
+#line 982
 
 sub is_eq {
     my( $self, $got, $expect, $name ) = @_;
     local $Level = $Level + 1;
-
-    $self->_unoverload_str( \$got, \$expect );
 
     if( !defined $got || !defined $expect ) {
         # undef only matches undef and nothing else
@@ -615,8 +692,6 @@ sub is_eq {
 sub is_num {
     my( $self, $got, $expect, $name ) = @_;
     local $Level = $Level + 1;
-
-    $self->_unoverload_num( \$got, \$expect );
 
     if( !defined $got || !defined $expect ) {
         # undef only matches undef and nothing else
@@ -675,7 +750,7 @@ sub _isnt_diag {
 DIAGNOSTIC
 }
 
-#line 973
+#line 1075
 
 sub isnt_eq {
     my( $self, $got, $dont_expect, $name ) = @_;
@@ -709,28 +784,35 @@ sub isnt_num {
     return $self->cmp_ok( $got, '!=', $dont_expect, $name );
 }
 
-#line 1022
+#line 1124
 
 sub like {
-    my( $self, $this, $regex, $name ) = @_;
+    my( $self, $thing, $regex, $name ) = @_;
 
     local $Level = $Level + 1;
-    return $self->_regex_ok( $this, $regex, '=~', $name );
+    return $self->_regex_ok( $thing, $regex, '=~', $name );
 }
 
 sub unlike {
-    my( $self, $this, $regex, $name ) = @_;
+    my( $self, $thing, $regex, $name ) = @_;
 
     local $Level = $Level + 1;
-    return $self->_regex_ok( $this, $regex, '!~', $name );
+    return $self->_regex_ok( $thing, $regex, '!~', $name );
 }
 
-#line 1046
+#line 1148
 
 my %numeric_cmps = map { ( $_, 1 ) } ( "<", "<=", ">", ">=", "==", "!=", "<=>" );
 
+# Bad, these are not comparison operators. Should we include more?
+my %cmp_ok_bl = map { ( $_, 1 ) } ( "=", "+=", ".=", "x=", "^=", "|=", "||=", "&&=", "...");
+
 sub cmp_ok {
     my( $self, $got, $type, $expect, $name ) = @_;
+
+    if ($cmp_ok_bl{$type}) {
+        $self->croak("$type is not a valid comparison operator in cmp_ok()");
+    }
 
     my $test;
     my $error;
@@ -741,8 +823,9 @@ sub cmp_ok {
 
         my($pack, $file, $line) = $self->caller();
 
+        # This is so that warnings come out at the caller's level
         $test = eval qq[
-#line 1 "cmp_ok [from $file line $line]"
+#line $line "(eval in cmp_ok) $file"
 \$got $type \$expect;
 ];
         $error = $@;
@@ -805,24 +888,31 @@ sub _caller_context {
     return $code;
 }
 
-#line 1145
+#line 1255
 
 sub BAIL_OUT {
     my( $self, $reason ) = @_;
 
     $self->{Bailed_Out} = 1;
+
+    if ($self->parent) {
+        $self->{Bailed_Out_Reason} = $reason;
+        $self->no_ending(1);
+        die bless {} => 'Test::Builder::Exception';
+    }
+
     $self->_print("Bail out!  $reason");
     exit 255;
 }
 
-#line 1158
+#line 1275
 
 {
     no warnings 'once';
     *BAILOUT = \&BAIL_OUT;
 }
 
-#line 1172
+#line 1289
 
 sub skip {
     my( $self, $why ) = @_;
@@ -853,7 +943,7 @@ sub skip {
     return 1;
 }
 
-#line 1213
+#line 1330
 
 sub todo_skip {
     my( $self, $why ) = @_;
@@ -881,7 +971,7 @@ sub todo_skip {
     return 1;
 }
 
-#line 1293
+#line 1410
 
 sub maybe_regex {
     my( $self, $regex ) = @_;
@@ -916,7 +1006,7 @@ sub _is_qr {
 }
 
 sub _regex_ok {
-    my( $self, $this, $regex, $cmp, $name ) = @_;
+    my( $self, $thing, $regex, $cmp, $name ) = @_;
 
     my $ok           = 0;
     my $usable_regex = $self->maybe_regex($regex);
@@ -928,14 +1018,19 @@ sub _regex_ok {
     }
 
     {
-        ## no critic (BuiltinFunctions::ProhibitStringyEval)
-
         my $test;
         my $context = $self->_caller_context;
 
-        local( $@, $!, $SIG{__DIE__} );    # isolate eval
+        {
+            ## no critic (BuiltinFunctions::ProhibitStringyEval)
 
-        $test = eval $context . q{$test = $this =~ /$usable_regex/ ? 1 : 0};
+            local( $@, $!, $SIG{__DIE__} );    # isolate eval
+
+            # No point in issuing an uninit warning, they'll see it in the diagnostics
+            no warnings 'uninitialized';
+
+            $test = eval $context . q{$test = $thing =~ /$usable_regex/ ? 1 : 0};
+        }
 
         $test = !$test if $cmp eq '!~';
 
@@ -944,11 +1039,11 @@ sub _regex_ok {
     }
 
     unless($ok) {
-        $this = defined $this ? "'$this'" : 'undef';
+        $thing = defined $thing ? "'$thing'" : 'undef';
         my $match = $cmp eq '=~' ? "doesn't match" : "matches";
 
         local $Level = $Level + 1;
-        $self->diag( sprintf <<'DIAGNOSTIC', $this, $match, $regex );
+        $self->diag( sprintf <<'DIAGNOSTIC', $thing, $match, $regex );
                   %s
     %13s '%s'
 DIAGNOSTIC
@@ -961,7 +1056,7 @@ DIAGNOSTIC
 # I'm not ready to publish this.  It doesn't deal with array return
 # values from the code or context.
 
-#line 1389
+#line 1511
 
 sub _try {
     my( $self, $code, %opts ) = @_;
@@ -981,7 +1076,7 @@ sub _try {
     return wantarray ? ( $return, $error ) : $return;
 }
 
-#line 1418
+#line 1540
 
 sub is_fh {
     my $self     = shift;
@@ -995,7 +1090,7 @@ sub is_fh {
            eval { tied($maybe_fh)->can('TIEHANDLE') };
 }
 
-#line 1461
+#line 1583
 
 sub level {
     my( $self, $level ) = @_;
@@ -1006,7 +1101,7 @@ sub level {
     return $Level;
 }
 
-#line 1493
+#line 1615
 
 sub use_numbers {
     my( $self, $use_nums ) = @_;
@@ -1017,7 +1112,7 @@ sub use_numbers {
     return $self->{Use_Nums};
 }
 
-#line 1526
+#line 1648
 
 foreach my $attribute (qw(No_Header No_Ending No_Diag)) {
     my $method = lc $attribute;
@@ -1035,7 +1130,7 @@ foreach my $attribute (qw(No_Header No_Ending No_Diag)) {
     *{ __PACKAGE__ . '::' . $method } = $code;
 }
 
-#line 1579
+#line 1701
 
 sub diag {
     my $self = shift;
@@ -1043,7 +1138,7 @@ sub diag {
     $self->_print_comment( $self->_diag_fh, @_ );
 }
 
-#line 1594
+#line 1716
 
 sub note {
     my $self = shift;
@@ -1080,7 +1175,7 @@ sub _print_comment {
     return 0;
 }
 
-#line 1644
+#line 1766
 
 sub explain {
     my $self = shift;
@@ -1099,7 +1194,7 @@ sub explain {
     } @_;
 }
 
-#line 1673
+#line 1795
 
 sub _print {
     my $self = shift;
@@ -1114,20 +1209,21 @@ sub _print_to_fh {
     return if $^C;
 
     my $msg = join '', @msgs;
+    my $indent = $self->_indent;
 
     local( $\, $", $, ) = ( undef, ' ', '' );
 
     # Escape each line after the first with a # so we don't
     # confuse Test::Harness.
-    $msg =~ s{\n(?!\z)}{\n# }sg;
+    $msg =~ s{\n(?!\z)}{\n$indent# }sg;
 
     # Stick a newline on the end if it needs it.
     $msg .= "\n" unless $msg =~ /\n\z/;
 
-    return print $fh $self->_indent, $msg;
+    return print $fh $indent, $msg;
 }
 
-#line 1732
+#line 1855
 
 sub output {
     my( $self, $fh ) = @_;
@@ -1223,8 +1319,8 @@ sub _open_testhandles {
     open( $Testout, ">&STDOUT" ) or die "Can't dup STDOUT:  $!";
     open( $Testerr, ">&STDERR" ) or die "Can't dup STDERR:  $!";
 
-    #    $self->_copy_io_layers( \*STDOUT, $Testout );
-    #    $self->_copy_io_layers( \*STDERR, $Testerr );
+    $self->_copy_io_layers( \*STDOUT, $Testout );
+    $self->_copy_io_layers( \*STDERR, $Testerr );
 
     $self->{Opened_Testhandles} = 1;
 
@@ -1239,14 +1335,22 @@ sub _copy_io_layers {
             require PerlIO;
             my @src_layers = PerlIO::get_layers($src);
 
-            binmode $dst, join " ", map ":$_", @src_layers if @src_layers;
+            _apply_layers($dst, @src_layers) if @src_layers;
         }
     );
 
     return;
 }
 
-#line 1857
+sub _apply_layers {
+    my ($fh, @layers) = @_;
+    my %seen;
+    my @unique = grep { $_ ne 'unix' and !$seen{$_}++ } @layers;
+    binmode($fh, join(":", "", "raw", @unique));
+}
+
+
+#line 1988
 
 sub reset_outputs {
     my $self = shift;
@@ -1258,7 +1362,7 @@ sub reset_outputs {
     return;
 }
 
-#line 1883
+#line 2014
 
 sub _message_at_caller {
     my $self = shift;
@@ -1279,7 +1383,7 @@ sub croak {
 }
 
 
-#line 1923
+#line 2054
 
 sub current_test {
     my( $self, $num ) = @_;
@@ -1312,7 +1416,7 @@ sub current_test {
     return $self->{Curr_Test};
 }
 
-#line 1971
+#line 2102
 
 sub is_passing {
     my $self = shift;
@@ -1325,7 +1429,7 @@ sub is_passing {
 }
 
 
-#line 1993
+#line 2124
 
 sub summary {
     my($self) = shift;
@@ -1333,14 +1437,14 @@ sub summary {
     return map { $_->{'ok'} } @{ $self->{Test_Results} };
 }
 
-#line 2048
+#line 2179
 
 sub details {
     my $self = shift;
     return @{ $self->{Test_Results} };
 }
 
-#line 2077
+#line 2208
 
 sub todo {
     my( $self, $pack ) = @_;
@@ -1354,19 +1458,21 @@ sub todo {
     return '';
 }
 
-#line 2099
+#line 2235
 
 sub find_TODO {
-    my( $self, $pack ) = @_;
+    my( $self, $pack, $set, $new_value ) = @_;
 
     $pack = $pack || $self->caller(1) || $self->exported_to;
     return unless $pack;
 
     no strict 'refs';    ## no critic
-    return ${ $pack . '::TODO' };
+    my $old_value = ${ $pack . '::TODO' };
+    $set and ${ $pack . '::TODO' } = $new_value;
+    return $old_value;
 }
 
-#line 2117
+#line 2255
 
 sub in_todo {
     my $self = shift;
@@ -1375,7 +1481,7 @@ sub in_todo {
     return( defined $self->{Todo} || $self->find_TODO ) ? 1 : 0;
 }
 
-#line 2167
+#line 2305
 
 sub todo_start {
     my $self = shift;
@@ -1390,7 +1496,7 @@ sub todo_start {
     return;
 }
 
-#line 2189
+#line 2327
 
 sub todo_end {
     my $self = shift;
@@ -1411,7 +1517,7 @@ sub todo_end {
     return;
 }
 
-#line 2222
+#line 2360
 
 sub caller {    ## no critic (Subroutines::ProhibitBuiltinHomonyms)
     my( $self, $height ) = @_;
@@ -1426,9 +1532,9 @@ sub caller {    ## no critic (Subroutines::ProhibitBuiltinHomonyms)
     return wantarray ? @caller : $caller[0];
 }
 
-#line 2239
+#line 2377
 
-#line 2253
+#line 2391
 
 #'#
 sub _sanity_check {
@@ -1441,7 +1547,7 @@ sub _sanity_check {
     return;
 }
 
-#line 2274
+#line 2412
 
 sub _whoa {
     my( $self, $check, $desc ) = @_;
@@ -1456,7 +1562,7 @@ WHOA
     return;
 }
 
-#line 2298
+#line 2436
 
 sub _my_exit {
     $? = $_[0];    ## no critic (Variables::RequireLocalizedPunctuationVars)
@@ -1464,7 +1570,7 @@ sub _my_exit {
     return 1;
 }
 
-#line 2310
+#line 2448
 
 sub _ending {
     my $self = shift;
@@ -1483,6 +1589,26 @@ sub _ending {
     if( !$self->{Have_Plan} and $self->{Curr_Test} ) {
         $self->is_passing(0);
         $self->diag("Tests were run but no plan was declared and done_testing() was not seen.");
+
+        if($real_exit_code) {
+            $self->diag(<<"FAIL");
+Looks like your test exited with $real_exit_code just after $self->{Curr_Test}.
+FAIL
+            $self->is_passing(0);
+            _my_exit($real_exit_code) && return;
+        }
+
+        # But if the tests ran, handle exit code.
+        my $test_results = $self->{Test_Results};
+        if(@$test_results) {
+            my $num_failed = grep !$_->{'ok'}, @{$test_results}[ 0 .. $self->{Curr_Test} - 1 ];
+            if ($num_failed > 0) {
+
+                my $exit_code = $num_failed <= 254 ? $num_failed : 254;
+                _my_exit($exit_code) && return;
+            }
+        }
+        _my_exit(254) && return;
     }
 
     # Exit if plan() was never called.  This is so "require Test::Simple"
@@ -1583,7 +1709,7 @@ END {
     $Test->_ending if defined $Test;
 }
 
-#line 2498
+#line 2656
 
 1;
 
