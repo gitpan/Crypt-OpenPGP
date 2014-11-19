@@ -2,8 +2,7 @@ package Crypt::OpenPGP;
 use strict;
 use 5.008_001;
 
-use vars qw( $VERSION );
-$VERSION = '1.07';
+our $VERSION = '1.08'; # VERSION
 
 use Crypt::OpenPGP::Constants qw( DEFAULT_CIPHER );
 use Crypt::OpenPGP::KeyRing;
@@ -11,6 +10,7 @@ use Crypt::OpenPGP::Plaintext;
 use Crypt::OpenPGP::Message;
 use Crypt::OpenPGP::PacketFactory;
 use Crypt::OpenPGP::Config;
+use Crypt::OpenPGP::Util;
 
 use Crypt::OpenPGP::ErrorHandler;
 use base qw( Crypt::OpenPGP::ErrorHandler );
@@ -455,8 +455,7 @@ sub encrypt {
                 Crypt::OpenPGP::Compressed->errstr);
         $ptdata = Crypt::OpenPGP::PacketFactory->save($cdata);
     }
-    require Crypt::Random;
-    my $key_data = Crypt::Random::makerandom_octet( Length => 32 );
+    my $key_data = Crypt::OpenPGP::Util::get_random_bytes(32);
     my $sym_alg = $param{Cipher} ?
         Crypt::OpenPGP::Cipher->alg_id($param{Cipher}) : DEFAULT_CIPHER;
     my(@sym_keys);

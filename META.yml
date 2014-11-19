@@ -1,46 +1,40 @@
 ---
 abstract: 'Pure-Perl OpenPGP implementation'
 author:
-  - Benjamin
+  - 'Sergey Romanov <sromanov@cpan.org>'
 build_requires:
-  ExtUtils::MakeMaker: 6.59
+  Test::Base: '0'
+  Test::Exception: '0'
+  Test::More: '0'
 configure_requires:
-  ExtUtils::MakeMaker: 6.59
-distribution_type: module
-dynamic_config: 1
-generated_by: 'Module::Install version 1.08'
+  ExtUtils::MakeMaker: '0'
+dynamic_config: 0
+generated_by: 'Dist::Zilla version 5.025, CPAN::Meta::Converter version 2.142690'
 license: perl
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
-  version: 1.4
+  version: '1.4'
 name: Crypt-OpenPGP
-no_index:
-  directory:
-    - inc
-    - t
-    - xt
 requires:
-  Compress::Zlib: 0
-  Crypt::Blowfish: 0
-  Crypt::CAST5_PP: 0
-  Crypt::DES_EDE3: 0
-  Crypt::DSA: 0
-  Crypt::IDEA: 0
-  Crypt::RIPEMD160: 0
-  Crypt::RSA: 0
-  Crypt::Rijndael: 0
-  Crypt::Twofish: 0
+  Alt::Crypt::RSA::BigInt: '0'
+  Compress::Zlib: '0'
+  Crypt::Blowfish: '0'
+  Crypt::CAST5_PP: '0'
+  Crypt::DES_EDE3: '0'
+  Crypt::DSA: '0'
+  Crypt::IDEA: '0'
+  Crypt::RIPEMD160: '0'
+  Crypt::Rijndael: '0'
+  Crypt::Twofish: '0'
   Data::Buffer: '0.04'
-  Digest::MD5: 0
-  Digest::SHA1: 0
-  File::HomeDir: 0
-  Filter::Util::Call: 0
-  LWP::UserAgent: 0
-  MIME::Base64: 0
-  Math::BigInt: 0
-  URI::Escape: 0
-  perl: 5.8.1
+  Digest::MD5: '0'
+  Digest::SHA1: '0'
+  File::HomeDir: '0'
+  LWP::UserAgent: '0'
+  MIME::Base64: '0'
+  Math::BigInt: '0'
+  URI::Escape: '0'
 resources:
-  license: http://dev.perl.org/licenses/
-  repository: git://github.com/btrott/Crypt-OpenPGP.git
-version: '1.07'
+  homepage: https://github.com/btrott/Crypt-OpenPGP
+  repository: https://github.com/btrott/Crypt-OpenPGP.git
+version: '1.08'
